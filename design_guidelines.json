@@ -1,0 +1,105 @@
+{
+  "theme": "light",
+  "archetype": "1 - Organic & Earthy",
+  "reasoning": "A highly disciplined daily schedule can feel rigid or stressful. An organic, earthy palette (sage green, warm sand, bone white) brings a sense of calm, wellness, and grounding, making habit tracking feel therapeutic rather than demanding.",
+  "colors": {
+    "background": "#F5F5F0",
+    "surface": "#FFFFFF",
+    "surface_secondary": "#EFEFE8",
+    "primary": "#2C4A3B",
+    "primary_hover": "#22392E",
+    "accent": "#C97A5E",
+    "accent_hover": "#B3654B",
+    "text_primary": "#1A1A1A",
+    "text_secondary": "#5C665F",
+    "border": "#D8DDD9",
+    "success": "#3B6950",
+    "error": "#964545",
+    "warning": "#C49647",
+    "chart": [
+      "#3B6950",
+      "#5A8B6F",
+      "#7EA88F",
+      "#A8C4B3",
+      "#D4E0D8"
+    ]
+  },
+  "typography": {
+    "heading_font": "Outfit, sans-serif",
+    "body_font": "Satoshi, sans-serif",
+    "scales": {
+      "h1": "text-4xl sm:text-5xl tracking-tight font-bold",
+      "h2": "text-2xl sm:text-3xl tracking-tight font-semibold",
+      "h3": "text-xl sm:text-2xl tracking-tight font-medium",
+      "h4": "text-lg sm:text-xl font-medium",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm leading-normal text-text_secondary",
+      "overline": "text-xs tracking-[0.2em] uppercase font-bold text-text_secondary"
+    }
+  },
+  "layout": {
+    "container": "w-full max-w-md mx-auto min-h-screen relative overflow-x-hidden pb-20 bg-background",
+    "spacing": "p-6",
+    "surface_style": "flat solid backgrounds with 1px subtle borders (border-border), no massive drop shadows for routine app clarity. Small radius rounded-2xl.",
+    "bento_grid": "Not applicable for a vertical timeline mobile app, but widgets (progress ring, stats) use 2-column grid layout gap-4"
+  },
+  "components": {
+    "timeline": {
+      "style": "Vertical left-aligned axis with a solid 2px line (border-border). Each task sits in a flat rectangular container or soft-rounded box. A circular node on the line acts as a visual checkbox indicator.",
+      "active_state": "bg-primary text-white scale-[1.02] transition-transform",
+      "completed_state": "opacity-50 line-through text-text_secondary transition-all"
+    },
+    "progress_ring": {
+      "style": "SVG circular progress bar (donut) embedded in a dashboard summary card. Uses the success color for the track and surface_secondary for the trail."
+    },
+    "bottom_nav": {
+      "style": "Fixed bottom navigation, crystal glassmorphism: backdrop-blur-xl bg-surface/70 border-t border-border/40 pb-safe pt-2 px-6 flex justify-between items-center z-50",
+      "active_icon": "text-primary stroke-2",
+      "inactive_icon": "text-text_secondary stroke-1"
+    },
+    "buttons": {
+      "primary": "bg-primary text-white rounded-xl px-6 py-3 font-semibold tracking-wide hover:-translate-y-1 hover:shadow-lg transition-all",
+      "secondary": "bg-surface text-primary border border-border rounded-xl px-6 py-3 font-semibold hover:bg-surface_secondary transition-all"
+    },
+    "inputs": {
+      "style": "bg-surface border-b-2 border-border focus:border-primary outline-none px-0 py-3 rounded-none w-full text-base transition-colors"
+    },
+    "calendar_heatmap": {
+      "style": "Grid of rounded-sm boxes similar to GitHub contributions. Colors range from surface_secondary (0%) to success (100%)."
+    }
+  },
+  "icons": {
+    "library": "lucide-react",
+    "usage": "Stroke width 1.5 for inactive, 2 or 2.5 for active. Optical alignment for buttons."
+  },
+  "motion": {
+    "hover": "transition-transform duration-200 ease-out",
+    "page_transition": "framer-motion opacity-0 translate-y-4 to opacity-100 translate-y-0 duration-400 ease-out",
+    "check_animation": "framer-motion scale-0 to scale-100 bounce effect on checkbox fill"
+  },
+  "media": {
+    "images": [
+      {
+        "url": "https://static.prod-images.emergentagent.com/jobs/2759095a-ea5e-4bf8-bfaa-8c6c51db7a91/images/57aa4b9f53bf857b83346eddae9deecc3d48e407070b73ef60b3f5ec228fe42b.png",
+        "category": "app_background",
+        "description": "Subtle, calming organic texture background, warm sand and bone white with a hint of sage green, minimalist. Use behind auth screens or settings page headers."
+      },
+      {
+        "url": "https://static.prod-images.emergentagent.com/jobs/2759095a-ea5e-4bf8-bfaa-8c6c51db7a91/images/29a35bd955e31d6819de3dbf118d6db3d02e187d997d3e349470c9f6cc1fe200.png",
+        "category": "empty_state",
+        "description": "Minimalist illustration of a person checking off a task. Use on history or dashboard when no tasks exist or daily goal achieved."
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Build a mobile-first responsive layout enforcing max-w-md mx-auto for desktop browsers to simulate mobile app boundaries.",
+    "Implement standard routing with React Router (or Expo Router) including: Auth (Login/Register), Dashboard (Today's Timeline), Calendar History, and Settings.",
+    "For the daily timeline, generate the exact schedule points from the user prompt statically (5:30 AM Wake Up to 11:00 PM Sleep) but allow them to be checkable and trackable.",
+    "Do not use Shadcn default Card for timeline items. Build a custom flat rectangular layout with left border acting as the timeline string.",
+    "Use lucide-react icons for the bottom tab bar (Home, History, Settings).",
+    "Ensure input fields on auth screens are highly accessible, labeled, and have high-contrast focus rings.",
+    "No AI dependencies required. Use local state or mock auth to establish the UI structure.",
+    "Ensure all interactive elements have data-testid attributes (e.g., data-testid='timeline-item-checkbox').",
+    "Use Outfit for headers (e.g. 'Sachin Schedule', 'Today') and Satoshi for task descriptions."
+  ]
+}

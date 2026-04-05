@@ -1,11 +1,11 @@
 {
   "expo": {
-    "name": "frontend",
-    "slug": "frontend",
+    "name": "Sachin Schedule",
+    "slug": "sachin-schedule",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "frontend",
+    "scheme": "sachin-schedule",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {

@@ -53,6 +53,7 @@ async def get_current_user(request: Request):
             raise HTTPException(401, "User not found")
         r = {k: v for k, v in user.items() if k != "_id"}
         r["_id"] = str(user["_id"])
+        r["id"] = str(user["_id"])
         r.pop("password_hash", None)
         return r
     except jwt.ExpiredSignatureError:
@@ -343,6 +344,24 @@ async def get_history(request: Request, month: Optional[int] = None, year: Optio
 async def get_day_detail(date_str: str, request: Request):
     user = await get_current_user(request)
     dt = datetime.strptime(date_str, "%Y-%m-%d")
+    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    today_str = now_ist.strftime("%Y-%m-%d")
+
+    # Future date guard: no incomplete data for future dates
+    is_future = date_str > today_str
+
+    # Registration date guard: only track incomplete after user joined
+    user_created = user.get("created_at")
+    if user_created:
+        if isinstance(user_created, str):
+            reg_date_str = user_created[:10]
+        else:
+            reg_ist = user_created + timedelta(hours=5, minutes=30)
+            reg_date_str = reg_ist.strftime("%Y-%m-%d")
+    else:
+        reg_date_str = "2000-01-01"
+    is_before_registration = date_str < reg_date_str
+
     sch = get_day_schedule(dt.strftime("%A"), dt.date())
     ids = get_all_task_ids(sch)
     p = await db.daily_progress.find_one({"user_id": str(user["_id"]), "date": date_str}, {"_id": 0})
@@ -352,7 +371,13 @@ async def get_day_detail(date_str: str, request: Request):
     for b in sch:
         for it in b["items"]:
             tm[it["id"]] = {"text": it["text"], "block": b["title"], "scheduled_time": b["time"]}
-    inc = [{"id": t, **tm[t]} for t in ids if t not in comp and t in tm]
+
+    # Only show incomplete tasks for dates: after registration AND not future
+    if is_future or is_before_registration:
+        inc = []
+    else:
+        inc = [{"id": t, **tm[t]} for t in ids if t not in comp and t in tm]
+
     cd = []
     for t in comp:
         if t in tm:
@@ -370,6 +395,9 @@ async def get_day_detail(date_str: str, request: Request):
         "total_tasks": len(ids),
         "completed_count": len(comp),
         "completion_percentage": p.get("completion_percentage", 0) if p else 0,
+        "is_future": is_future,
+        "is_before_registration": is_before_registration,
+        "registration_date": reg_date_str,
     }
 
 # ANALYTICS
@@ -378,9 +406,25 @@ async def get_analytics(request: Request, days: int = 30):
     user = await get_current_user(request)
     uid = str(user["_id"])
     now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    today_str = now.strftime("%Y-%m-%d")
+
+    # Registration date: only count days from when user joined
+    user_created = user.get("created_at")
+    if user_created:
+        if isinstance(user_created, str):
+            reg_date_str = user_created[:10]
+        else:
+            reg_ist = user_created + timedelta(hours=5, minutes=30)
+            reg_date_str = reg_ist.strftime("%Y-%m-%d")
+    else:
+        reg_date_str = "2000-01-01"
+
     start = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+    effective_start = max(start, reg_date_str)  # Don't go before registration
+
     all_docs = await db.daily_progress.find({"user_id": uid}, {"_id": 0}).to_list(1000)
-    docs = [d for d in all_docs if d.get("date", "") >= start]
+    # Only include docs between effective_start and today (no future)
+    docs = [d for d in all_docs if effective_start <= d.get("date", "") <= today_str]
     if not docs:
         return {"total_days_tracked": 0, "avg_completion": 0, "perfect_days": 0, "most_missed_tasks": [], "best_tasks": [], "delay_insights": [], "streak": 0, "period_days": days}
     total = len(docs)

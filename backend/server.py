@@ -1,80 +1,69 @@
 from dotenv import load_dotenv
 from pathlib import Path
-
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 from fastapi import FastAPI, APIRouter, Request, HTTPException, Response
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-import os
-import logging
-import bcrypt
-import jwt
-from pydantic import BaseModel, Field
-from typing import List, Optional
+import os, logging, bcrypt, jwt
+from pydantic import BaseModel
+from typing import Optional
 from datetime import datetime, timezone, timedelta
 from bson import ObjectId
 
-# MongoDB connection
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
-
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
-
 JWT_ALGORITHM = "HS256"
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Password Helpers ---
-def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+def hash_password(p):
+    return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
 
-def verify_password(plain: str, hashed: str) -> bool:
-    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+def verify_password(p, h):
+    return bcrypt.checkpw(p.encode(), h.encode())
 
-def get_jwt_secret() -> str:
+def get_jwt_secret():
     return os.environ["JWT_SECRET"]
 
-def create_access_token(user_id: str, email: str) -> str:
-    payload = {"sub": user_id, "email": email, "exp": datetime.now(timezone.utc) + timedelta(minutes=15), "type": "access"}
-    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+def create_access_token(uid, email):
+    return jwt.encode({"sub": uid, "email": email, "exp": datetime.now(timezone.utc) + timedelta(minutes=15), "type": "access"}, get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
-def create_refresh_token(user_id: str) -> str:
-    payload = {"sub": user_id, "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "refresh"}
-    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+def create_refresh_token(uid):
+    return jwt.encode({"sub": uid, "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "refresh"}, get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
-async def get_current_user(request: Request) -> dict:
+async def get_current_user(request: Request):
     token = request.cookies.get("access_token")
     if not token:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
+        ah = request.headers.get("Authorization", "")
+        if ah.startswith("Bearer "):
+            token = ah[7:]
     if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise HTTPException(401, "Not authenticated")
     try:
         payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "access":
-            raise HTTPException(status_code=401, detail="Invalid token type")
+            raise HTTPException(401, "Invalid token")
         user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
         if not user:
-            raise HTTPException(status_code=401, detail="User not found")
-        user["_id"] = str(user["_id"])
-        user.pop("password_hash", None)
-        return user
+            raise HTTPException(401, "User not found")
+        r = {k: v for k, v in user.items() if k != "_id"}
+        r["_id"] = str(user["_id"])
+        r.pop("password_hash", None)
+        return r
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
+        raise HTTPException(401, "Token expired")
     except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(401, "Invalid token")
 
-def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
-    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="lax", max_age=900, path="/")
-    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+def set_cookies(resp, at, rt):
+    resp.set_cookie("access_token", at, httponly=True, secure=False, samesite="lax", max_age=900, path="/")
+    resp.set_cookie("refresh_token", rt, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
 
-# --- Models ---
 class RegisterInput(BaseModel):
     email: str
     password: str
@@ -86,54 +75,49 @@ class LoginInput(BaseModel):
 
 class ToggleTaskInput(BaseModel):
     task_id: str
-    date: str  # YYYY-MM-DD
+    date: str
 
-# --- Auth Endpoints ---
+class SetTaskTimeInput(BaseModel):
+    task_id: str
+    date: str
+    actual_time: str
+
+# AUTH ENDPOINTS
 @api_router.post("/auth/register")
 async def register(inp: RegisterInput, response: Response):
     email = inp.email.lower().strip()
     if await db.users.find_one({"email": email}):
-        raise HTTPException(status_code=400, detail="Email already registered")
-    hashed = hash_password(inp.password)
-    doc = {"email": email, "password_hash": hashed, "name": inp.name.strip(), "role": "user", "created_at": datetime.now(timezone.utc)}
-    result = await db.users.insert_one(doc)
-    user_id = str(result.inserted_id)
-    at = create_access_token(user_id, email)
-    rt = create_refresh_token(user_id)
-    set_auth_cookies(response, at, rt)
-    return {"id": user_id, "email": email, "name": inp.name.strip(), "role": "user", "access_token": at}
+        raise HTTPException(400, "Email already registered")
+    h = hash_password(inp.password)
+    result = await db.users.insert_one({"email": email, "password_hash": h, "name": inp.name.strip(), "role": "user", "created_at": datetime.now(timezone.utc)})
+    uid = str(result.inserted_id)
+    at = create_access_token(uid, email)
+    rt = create_refresh_token(uid)
+    set_cookies(response, at, rt)
+    return {"id": uid, "email": email, "name": inp.name.strip(), "role": "user", "access_token": at}
 
 @api_router.post("/auth/login")
 async def login(inp: LoginInput, request: Request, response: Response):
     email = inp.email.lower().strip()
     ip = request.client.host if request.client else "unknown"
-    identifier = f"{ip}:{email}"
-    # brute force check
-    attempts = await db.login_attempts.find_one({"identifier": identifier})
-    if attempts and attempts.get("count", 0) >= 5:
-        locked_until = attempts.get("locked_until")
-        if locked_until and datetime.now(timezone.utc) < locked_until:
-            raise HTTPException(status_code=429, detail="Too many failed attempts. Try again in 15 minutes.")
+    ident = f"{ip}:{email}"
+    att = await db.login_attempts.find_one({"identifier": ident})
+    if att and att.get("count", 0) >= 5:
+        lu = att.get("locked_until")
+        if lu and datetime.now(timezone.utc) < lu:
+            raise HTTPException(429, "Too many attempts. Try in 15 min.")
         else:
-            await db.login_attempts.delete_one({"identifier": identifier})
-
+            await db.login_attempts.delete_one({"identifier": ident})
     user = await db.users.find_one({"email": email})
     if not user or not verify_password(inp.password, user["password_hash"]):
-        # increment failed attempts
-        await db.login_attempts.update_one(
-            {"identifier": identifier},
-            {"$inc": {"count": 1}, "$set": {"locked_until": datetime.now(timezone.utc) + timedelta(minutes=15)}},
-            upsert=True
-        )
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-
-    # clear attempts on success
-    await db.login_attempts.delete_many({"identifier": identifier})
-    user_id = str(user["_id"])
-    at = create_access_token(user_id, email)
-    rt = create_refresh_token(user_id)
-    set_auth_cookies(response, at, rt)
-    return {"id": user_id, "email": email, "name": user.get("name", ""), "role": user.get("role", "user"), "access_token": at}
+        await db.login_attempts.update_one({"identifier": ident}, {"$inc": {"count": 1}, "$set": {"locked_until": datetime.now(timezone.utc) + timedelta(minutes=15)}}, upsert=True)
+        raise HTTPException(401, "Invalid email or password")
+    await db.login_attempts.delete_many({"identifier": ident})
+    uid = str(user["_id"])
+    at = create_access_token(uid, email)
+    rt = create_refresh_token(uid)
+    set_cookies(response, at, rt)
+    return {"id": uid, "email": email, "name": user.get("name", ""), "role": user.get("role", "user"), "access_token": at}
 
 @api_router.post("/auth/logout")
 async def logout(response: Response):
@@ -144,340 +128,344 @@ async def logout(response: Response):
 @api_router.get("/auth/me")
 async def auth_me(request: Request):
     user = await get_current_user(request)
-    # Remove _id from response
-    user_response = {k: v for k, v in user.items() if k != "_id"}
-    return user_response
+    # Exclude _id from response (use id instead)
+    result = {k: v for k, v in user.items() if k != "_id"}
+    result["id"] = user["_id"]
+    return result
 
 @api_router.post("/auth/refresh")
 async def refresh_token(request: Request, response: Response):
     token = request.cookies.get("refresh_token")
     if not token:
-        raise HTTPException(status_code=401, detail="No refresh token")
+        raise HTTPException(401, "No refresh token")
     try:
         payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "refresh":
-            raise HTTPException(status_code=401, detail="Invalid token type")
+            raise HTTPException(401, "Invalid token")
         user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
         if not user:
-            raise HTTPException(status_code=401, detail="User not found")
-        user_id = str(user["_id"])
-        at = create_access_token(user_id, user["email"])
-        response.set_cookie(key="access_token", value=at, httponly=True, secure=False, samesite="lax", max_age=900, path="/")
+            raise HTTPException(401, "User not found")
+        at = create_access_token(str(user["_id"]), user["email"])
+        response.set_cookie("access_token", at, httponly=True, secure=False, samesite="lax", max_age=900, path="/")
         return {"message": "Token refreshed", "access_token": at}
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Refresh token expired")
+        raise HTTPException(401, "Refresh token expired")
     except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid refresh token")
+        raise HTTPException(401, "Invalid refresh token")
 
-# --- Schedule Data (Static from Excel) ---
-def get_day_schedule(day_name: str):
-    """Return the full daily schedule based on the day of the week."""
-    is_sunday = day_name == "Sunday"
-    is_thursday = day_name == "Thursday"
-    is_friday = day_name == "Friday"
-    is_saturday = day_name == "Saturday"
-    is_weekend = is_friday or is_saturday or is_sunday
-
-    # Determine shampoo day (alternate days, not sunday)
-    from datetime import date
-    today = date.today()
-    is_shampoo_day = (today.timetuple().tm_yday % 2 == 0) and not is_sunday
-
-    schedule = []
-
-    # 1. Wake Up Block - 5:30 AM
-    schedule.append({"id": "wake_up", "time": "05:30", "block": "Wake Up", "title": "Wake Up", "icon": "sunrise", "items": []})
-
-    wake_items = [
-        {"id": "wash_face", "text": "Wash Face (Cleanser + Moisturizer)", "daily": True},
-        {"id": "water", "text": "Drink 2 Glasses of Water", "daily": True},
-        {"id": "black_coffee", "text": "Black Coffee", "daily": True},
-    ]
-    if not is_sunday:
-        wake_items.append({"id": "banana", "text": "1-2 Bananas", "daily": False})
-    schedule[0]["items"] = wake_items
-
-    # 2. Gym Block - 6:00 AM
-    gym_items = [
-        {"id": "stretching", "text": "Stretching - 5 Minutes", "daily": True},
-        {"id": "treadmill", "text": "Treadmill - 5 Minutes (Running)", "daily": True},
-        {"id": "exercise", "text": "Exercise", "daily": True},
-        {"id": "meditation", "text": "Meditation" + (" (Extended)" if is_friday or is_saturday else ""), "daily": True},
-    ]
-    schedule.append({"id": "gym", "time": "06:00", "block": "Gym & Fitness", "title": "Gym & Fitness", "icon": "dumbbell", "items": gym_items})
-
-    # 3. Morning Routine - 7:30 AM
-    morning_items = []
-    if not is_sunday:
-        morning_items.append({"id": "boil_eggs", "text": "Boil Eggs (6: 2+4) + 1 Potato", "daily": False})
-    morning_items.extend([
-        {"id": "fresh", "text": "Fresh Up", "daily": True},
-        {"id": "brush", "text": "Brush (Superfast!)", "daily": True},
-        {"id": "bath", "text": "Bath", "daily": True},
-    ])
-    if is_shampoo_day:
-        morning_items.extend([
-            {"id": "shampoo", "text": "Shampoo", "daily": False},
-            {"id": "conditioner", "text": "Conditioner", "daily": False},
-        ])
-    morning_items.extend([
-        {"id": "cleanser_morning", "text": "Cleanser", "daily": True},
-        {"id": "body_wash", "text": "Body Wash", "daily": True},
-        {"id": "soap", "text": "Soap", "daily": True},
-    ])
-    if not is_sunday and not is_thursday:
-        morning_items.append({"id": "sea_salt", "text": "Sea Salt", "daily": False})
-    morning_items.extend([
-        {"id": "hair_dryer", "text": "Hair Dryer", "daily": True},
-        {"id": "clay_wax", "text": "Clay Wax", "daily": True},
-        {"id": "moisturizer_morning", "text": "Moisturizer", "daily": True},
-        {"id": "sunscreen", "text": "Sunscreen", "daily": True},
-    ])
-    schedule.append({"id": "morning_routine", "time": "07:30", "block": "Morning Routine", "title": "Morning Routine", "icon": "sparkles", "items": morning_items})
-
-    # 4. Breakfast & Supplements - 9:00 AM
-    breakfast_items = []
-    if not is_sunday:
-        breakfast_items.extend([
-            {"id": "eat_eggs", "text": "Eat Eggs + Potato", "daily": False},
-            {"id": "creatine", "text": "Creatine", "daily": False},
-            {"id": "vitamin_d3", "text": "Vitamin D3", "daily": False},
-            {"id": "whey_protein", "text": "Whey Protein", "daily": False},
-            {"id": "chia", "text": "Chia Seeds", "daily": False},
-        ])
-    breakfast_items.extend([
-        {"id": "perfume", "text": "Perfume / Deodorant", "daily": True},
-        {"id": "clean_clothes", "text": "Clean Clothes", "daily": True},
-        {"id": "watch", "text": "Watch", "daily": True},
-        {"id": "chain", "text": "Chain", "daily": True},
-    ])
-    schedule.append({"id": "breakfast", "time": "09:00", "block": "Breakfast & Get Ready", "title": "Breakfast & Get Ready", "icon": "utensils", "items": breakfast_items})
-
-    # 5. Work/Study Block 1 - 10:00 AM
-    work1_label = "Work / Study (Mon-Thu)" if not is_weekend else "Work / Study (Fri-Sun)"
-    schedule.append({"id": "work1", "time": "10:00", "block": work1_label, "title": work1_label, "icon": "laptop", "items": [
-        {"id": "work_session_1", "text": "Focus Work Session 1", "daily": True},
-    ]})
-
-    # 6. Lunch - 1:00 PM
-    schedule.append({"id": "lunch", "time": "13:00", "block": "Lunch", "title": "Lunch", "icon": "salad", "items": [
-        {"id": "lunch_food", "text": "Roti + Sabji + Ghee", "daily": True},
-        {"id": "curd", "text": "Curd", "daily": True},
-        {"id": "green_tea", "text": "Green Tea", "daily": True},
-    ]})
-
-    # 7. Work/Study Block 2 - 2:00 PM
-    work2_label = "Work / Study (Mon-Thu)" if not is_weekend else "Work / Study (Fri-Sun)"
-    schedule.append({"id": "work2", "time": "14:00", "block": work2_label, "title": work2_label, "icon": "book-open", "items": [
-        {"id": "work_session_2", "text": "Focus Work Session 2", "daily": True},
-    ]})
-
-    # 8. Diet Snack - 5:00 PM
-    schedule.append({"id": "diet", "time": "17:00", "block": "Diet / Snack", "title": "Diet / Snack", "icon": "apple", "items": [
-        {"id": "soaked_chana", "text": "Soaked Chana - 20gm", "daily": True},
-        {"id": "egg_whites", "text": "4 Egg Whites", "daily": True},
-        {"id": "soya_chunks", "text": "Soya Chunks - 50gm", "daily": True},
-        {"id": "soaked_soyabeans", "text": "Soaked Soya Beans - 40gm", "daily": True},
-        {"id": "jeera", "text": "Jeera", "daily": True},
-    ]})
-
-    # 9. Reading/Study - 6:00 PM
-    schedule.append({"id": "reading", "time": "18:00", "block": "Reading / Study / Test", "title": "Reading / Study / Test", "icon": "book", "items": [
-        {"id": "reading_session", "text": "Reading / Study Session", "daily": True},
-    ]})
-
-    # 10. Dinner - 7:00 PM
-    schedule.append({"id": "dinner", "time": "19:00", "block": "Dinner", "title": "Dinner", "icon": "moon", "items": [
-        {"id": "dinner_food", "text": "Roti + Sabji + Ghee", "daily": True},
-        {"id": "milk", "text": "Milk", "daily": True},
-    ]})
-
-    # 11. Evening Goals - 8:00 PM
-    schedule.append({"id": "evening", "time": "20:00", "block": "Evening Goals", "title": "Evening Goals", "icon": "target", "items": [
-        {"id": "goals_review", "text": "Remember Goals / AEON", "daily": True},
-        {"id": "no_screens", "text": "No Screens Allowed", "daily": True},
-    ]})
-
-    # 12. Bedtime Routine - 10:00 PM
-    schedule.append({"id": "bedtime", "time": "22:00", "block": "Bedtime Routine", "title": "Bedtime Routine", "icon": "bed", "items": [
-        {"id": "cleanser_night", "text": "Cleanser", "daily": True},
-        {"id": "moisturizer_night", "text": "Moisturizer", "daily": True},
-        {"id": "mustard_oil", "text": "Mustard Oil", "daily": True},
-    ]})
-
-    # 13. Sleep - 11:00 PM
-    if is_sunday:
-        schedule.append({"id": "sleep", "time": "23:00", "block": "Sleep", "title": "Sleep (Rest Day)", "icon": "cloud-moon", "items": [
-            {"id": "sleep_time", "text": "Sleep - Rest & Recover", "daily": True},
-        ]})
+# SCHEDULE - Corrected timings from Excel
+def get_day_schedule(day_name, date_obj=None):
+    is_sun = day_name == "Sunday"
+    is_thu = day_name == "Thursday"
+    is_fri = day_name == "Friday"
+    is_sat = day_name == "Saturday"
+    is_work = day_name in ["Monday", "Tuesday", "Wednesday", "Thursday"]
+    if date_obj:
+        is_shampoo = (date_obj.timetuple().tm_yday % 2 == 0) and not is_sun
     else:
-        schedule.append({"id": "sleep", "time": "23:00", "block": "Sleep", "title": "Sleep", "icon": "cloud-moon", "items": [
-            {"id": "sleep_time", "text": "Sleep", "daily": True},
-        ]})
+        from datetime import date
+        is_shampoo = (date.today().timetuple().tm_yday % 2 == 0) and not is_sun
 
-    return schedule
+    s = []
 
+    # 1. Wake Up 5:30-6:00
+    wi = [
+        {"id": "wash_face", "text": "Wash Face (Cleanser + Moisturizer)"},
+        {"id": "water", "text": "Drink 2 Glasses of Water"},
+        {"id": "black_coffee", "text": "Black Coffee"},
+    ]
+    if not is_sun:
+        wi.append({"id": "banana", "text": "1-2 Bananas"})
+    s.append({"id": "wake_up", "time": "05:30", "end_time": "06:00", "block": "Wake Up", "title": "Wake Up", "icon": "sunrise", "items": wi})
+
+    # 2. Gym & Fitness 6:00-8:10
+    gi = [
+        {"id": "stretching", "text": "Stretching - 5 Minutes"},
+        {"id": "treadmill", "text": "Treadmill - 5 Minutes (Running)"},
+        {"id": "exercise", "text": "Exercise"},
+        {"id": "meditation", "text": "Meditation" + (" (Extended)" if is_fri or is_sat else "")},
+    ]
+    s.append({"id": "gym", "time": "06:00", "end_time": "08:10", "block": "Gym & Fitness", "title": "Gym & Fitness", "icon": "dumbbell", "items": gi})
+
+    # 3. Morning Routine 8:10-9:30 (ONE block: hygiene + diet + get ready)
+    mi = []
+    if not is_sun:
+        mi.append({"id": "boil_eggs", "text": "Boil Eggs * 6(2+4) + 1 Potato"})
+    mi.append({"id": "fresh", "text": "Fresh"})
+    mi.append({"id": "brush", "text": "Brush"})
+    mi.append({"id": "bath", "text": "Bath"})
+    if is_shampoo:
+        mi.append({"id": "shampoo", "text": "Shampoo"})
+        mi.append({"id": "conditioner", "text": "Conditioner"})
+    mi.append({"id": "cleanser_morning", "text": "Cleanser"})
+    mi.append({"id": "body_wash", "text": "Body Wash"})
+    mi.append({"id": "soap", "text": "Soap"})
+    if not is_sun and not is_thu:
+        mi.append({"id": "sea_salt", "text": "Sea Salt"})
+    mi.append({"id": "hair_dryer", "text": "Hair Dryer"})
+    mi.append({"id": "clay_wax", "text": "Clay Wax"})
+    mi.append({"id": "moisturizer_morning", "text": "Moisturizer"})
+    mi.append({"id": "sunscreen", "text": "Sunscreen"})
+    if not is_sun:
+        mi.append({"id": "eat_eggs", "text": "Eat - Eggs, Potato"})
+        mi.append({"id": "creatine", "text": "Creatine"})
+        mi.append({"id": "vitamin_d3", "text": "Vitamin D3"})
+        mi.append({"id": "whey_protein", "text": "Whey Protein"})
+        mi.append({"id": "chia", "text": "Chia Seeds"})
+    mi.append({"id": "perfume", "text": "Perfume / Deodorant"})
+    mi.append({"id": "clean_clothes", "text": "Clean Clothes"})
+    mi.append({"id": "watch_item", "text": "Watch"})
+    mi.append({"id": "chain", "text": "Chain"})
+    s.append({"id": "morning_routine", "time": "08:10", "end_time": "09:30", "block": "Morning Routine", "title": "Morning Routine", "icon": "sparkles", "items": mi})
+
+    # 4. Work/Study Session 1: 9:30-15:00
+    if is_work:
+        s.append({"id": "work1", "time": "09:30", "end_time": "15:00", "block": "Work Session 1", "title": "Work Session 1", "icon": "laptop", "items": [{"id": "work_session_1", "text": "Work Session 1 (Mon-Thu)"}]})
+    else:
+        s.append({"id": "work1", "time": "09:30", "end_time": "15:00", "block": "Study Session 1", "title": "Study Session 1", "icon": "book-open", "items": [{"id": "study_session_1", "text": "Study Session 1 (Fri-Sun)"}]})
+
+    # 5. Lunch 15:00-15:30
+    s.append({"id": "lunch", "time": "15:00", "end_time": "15:30", "block": "Lunch", "title": "Lunch", "icon": "salad", "items": [
+        {"id": "lunch_food", "text": "Roti + Sabji + Ghee"},
+        {"id": "curd", "text": "Curd"},
+        {"id": "green_tea", "text": "Green Tea"},
+    ]})
+
+    # 6. Work/Study Session 2: 15:30-18:00
+    if is_work:
+        s.append({"id": "work2", "time": "15:30", "end_time": "18:00", "block": "Work Session 2", "title": "Work Session 2", "icon": "laptop", "items": [{"id": "work_session_2", "text": "Work Session 2 (Mon-Thu)"}]})
+    else:
+        s.append({"id": "work2", "time": "15:30", "end_time": "18:00", "block": "Study Session 2", "title": "Study Session 2", "icon": "book-open", "items": [{"id": "study_session_2", "text": "Study Session 2 (Fri-Sun)"}]})
+
+    # 7. Diet & Snack 18:00-19:00
+    s.append({"id": "diet", "time": "18:00", "end_time": "19:00", "block": "Diet & Snack", "title": "Diet & Snack", "icon": "apple", "items": [
+        {"id": "soaked_chana", "text": "Soaked Chana - 20gm"},
+        {"id": "egg_whites", "text": "4 Egg Whites"},
+        {"id": "soya_chunks", "text": "Soya Chunks - 50gm"},
+        {"id": "soaked_soyabeans", "text": "Soaked Soya Beans - 40gm"},
+        {"id": "jeera", "text": "Jeera"},
+    ]})
+
+    # 8. Reading / Study / Test 19:00-20:55
+    s.append({"id": "reading", "time": "19:00", "end_time": "20:55", "block": "Reading / Study / Test", "title": "Reading / Study / Test", "icon": "book", "items": [
+        {"id": "reading_session", "text": "Reading / Study Session"},
+    ]})
+
+    # 9. Dinner 21:00-21:15
+    s.append({"id": "dinner", "time": "21:00", "end_time": "21:15", "block": "Dinner", "title": "Dinner", "icon": "moon", "items": [
+        {"id": "dinner_food", "text": "Roti + Sabji + Ghee"},
+        {"id": "milk", "text": "Milk"},
+    ]})
+
+    # 10. Bedtime Routine 21:15-22:00
+    s.append({"id": "bedtime", "time": "21:15", "end_time": "22:00", "block": "Bedtime Routine", "title": "Bedtime Routine", "icon": "bed", "items": [
+        {"id": "goals_review", "text": "Remember Goals / AEON"},
+        {"id": "no_screens", "text": "No Screens Allowed"},
+        {"id": "cleanser_night", "text": "Cleanser"},
+        {"id": "moisturizer_night", "text": "Moisturizer"},
+        {"id": "mustard_oil", "text": "Mustard Oil"},
+    ]})
+
+    # 11. Sleep 22:00
+    s.append({"id": "sleep", "time": "22:00", "end_time": "05:30", "block": "Sleep", "title": "Sleep", "icon": "cloud-moon", "items": [
+        {"id": "sleep_time", "text": "Sleep - Rest & Recover" if is_sun else "Sleep"},
+    ]})
+
+    return s
 
 def get_all_task_ids(schedule):
-    ids = []
-    for block in schedule:
-        for item in block["items"]:
-            ids.append(item["id"])
-    return ids
+    return [item["id"] for block in schedule for item in block["items"]]
 
-# --- Schedule Endpoints ---
+# SCHEDULE ENDPOINTS
 @api_router.get("/schedule")
 async def get_schedule(request: Request):
     user = await get_current_user(request)
-    now = datetime.now(timezone.utc)
-    # Use IST (UTC+5:30) for day calculation
-    ist_now = now + timedelta(hours=5, minutes=30)
-    day_name = ist_now.strftime("%A")
-    date_str = ist_now.strftime("%Y-%m-%d")
-
-    schedule = get_day_schedule(day_name)
-    all_task_ids = get_all_task_ids(schedule)
-
-    # Get progress for today
-    progress = await db.daily_progress.find_one(
-        {"user_id": str(user["_id"]), "date": date_str},
-        {"_id": 0}
-    )
-    completed = progress.get("completed_tasks", []) if progress else []
-
+    now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    ds = now.strftime("%Y-%m-%d")
+    sch = get_day_schedule(now.strftime("%A"), now.date())
+    ids = get_all_task_ids(sch)
+    p = await db.daily_progress.find_one({"user_id": str(user["_id"]), "date": ds}, {"_id": 0})
+    comp = p.get("completed_tasks", []) if p else []
+    tms = p.get("task_timings", {}) if p else {}
     return {
-        "date": date_str,
-        "day": day_name,
-        "schedule": schedule,
-        "completed_tasks": completed,
-        "total_tasks": len(all_task_ids),
-        "completed_count": len([t for t in completed if t in all_task_ids]),
+        "date": ds, "day": now.strftime("%A"), "schedule": sch,
+        "completed_tasks": comp, "task_timings": tms,
+        "total_tasks": len(ids),
+        "completed_count": len([t for t in comp if t in ids]),
     }
 
 @api_router.post("/schedule/toggle")
 async def toggle_task(inp: ToggleTaskInput, request: Request):
     user = await get_current_user(request)
-    user_id = str(user["_id"])
-    date_str = inp.date
-
-    # Get schedule for the date to validate
-    from datetime import date as date_type
-    dt = datetime.strptime(date_str, "%Y-%m-%d")
-    day_name = dt.strftime("%A")
-    schedule = get_day_schedule(day_name)
-    all_task_ids = get_all_task_ids(schedule)
-
-    progress = await db.daily_progress.find_one({"user_id": user_id, "date": date_str})
-    completed = progress.get("completed_tasks", []) if progress else []
-
-    if inp.task_id in completed:
-        completed.remove(inp.task_id)
+    uid = str(user["_id"])
+    dt = datetime.strptime(inp.date, "%Y-%m-%d")
+    sch = get_day_schedule(dt.strftime("%A"), dt.date())
+    ids = get_all_task_ids(sch)
+    p = await db.daily_progress.find_one({"user_id": uid, "date": inp.date})
+    comp = p.get("completed_tasks", []) if p else []
+    if inp.task_id in comp:
+        comp.remove(inp.task_id)
     else:
-        completed.append(inp.task_id)
-
-    valid_completed = [t for t in completed if t in all_task_ids]
-    percentage = round((len(valid_completed) / len(all_task_ids)) * 100) if all_task_ids else 0
-
+        comp.append(inp.task_id)
+    v = [t for t in comp if t in ids]
+    pct = round((len(v) / len(ids)) * 100) if ids else 0
     await db.daily_progress.update_one(
-        {"user_id": user_id, "date": date_str},
-        {"$set": {
-            "completed_tasks": valid_completed,
-            "total_tasks": len(all_task_ids),
-            "completion_percentage": percentage,
-            "updated_at": datetime.now(timezone.utc)
-        }},
-        upsert=True
+        {"user_id": uid, "date": inp.date},
+        {"$set": {"completed_tasks": v, "total_tasks": len(ids), "completion_percentage": pct, "updated_at": datetime.now(timezone.utc)}},
+        upsert=True,
     )
+    return {"date": inp.date, "completed_tasks": v, "total_tasks": len(ids), "completed_count": len(v), "completion_percentage": pct}
 
-    return {
-        "date": date_str,
-        "completed_tasks": valid_completed,
-        "total_tasks": len(all_task_ids),
-        "completed_count": len(valid_completed),
-        "completion_percentage": percentage,
-    }
+@api_router.post("/schedule/set-time")
+async def set_task_time(inp: SetTaskTimeInput, request: Request):
+    user = await get_current_user(request)
+    await db.daily_progress.update_one(
+        {"user_id": str(user["_id"]), "date": inp.date},
+        {"$set": {f"task_timings.{inp.task_id}": inp.actual_time, "updated_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
+    return {"status": "ok", "task_id": inp.task_id, "actual_time": inp.actual_time}
 
-# --- History Endpoint ---
+# HISTORY
 @api_router.get("/history")
 async def get_history(request: Request, month: Optional[int] = None, year: Optional[int] = None):
     user = await get_current_user(request)
     now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
     m = month or now.month
     y = year or now.year
-
-    # Get all progress docs for the month
-    date_prefix = f"{y}-{m:02d}"
     docs = await db.daily_progress.find(
-        {"user_id": str(user["_id"]), "date": {"$regex": f"^{date_prefix}"}},
-        {"_id": 0}
+        {"user_id": str(user["_id"]), "date": {"$regex": f"^{y}-{m:02d}"}},
+        {"_id": 0},
     ).to_list(100)
+    return {"month": m, "year": y, "days": docs}
 
+@api_router.get("/history/day/{date_str}")
+async def get_day_detail(date_str: str, request: Request):
+    user = await get_current_user(request)
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    sch = get_day_schedule(dt.strftime("%A"), dt.date())
+    ids = get_all_task_ids(sch)
+    p = await db.daily_progress.find_one({"user_id": str(user["_id"]), "date": date_str}, {"_id": 0})
+    comp = p.get("completed_tasks", []) if p else []
+    tms = p.get("task_timings", {}) if p else {}
+    tm = {}
+    for b in sch:
+        for it in b["items"]:
+            tm[it["id"]] = {"text": it["text"], "block": b["title"], "scheduled_time": b["time"]}
+    inc = [{"id": t, **tm[t]} for t in ids if t not in comp and t in tm]
+    cd = []
+    for t in comp:
+        if t in tm:
+            d = {"id": t, **tm[t]}
+            if t in tms:
+                d["actual_time"] = tms[t]
+            cd.append(d)
     return {
-        "month": m,
-        "year": y,
-        "days": docs,
+        "date": date_str, "day": dt.strftime("%A"), "schedule": sch,
+        "completed_tasks": comp,
+        "incomplete_tasks": [t["id"] for t in inc],
+        "incomplete_details": inc,
+        "completed_details": cd,
+        "task_timings": tms,
+        "total_tasks": len(ids),
+        "completed_count": len(comp),
+        "completion_percentage": p.get("completion_percentage", 0) if p else 0,
     }
 
-# --- Startup ---
+# ANALYTICS
+@api_router.get("/analytics")
+async def get_analytics(request: Request, days: int = 30):
+    user = await get_current_user(request)
+    uid = str(user["_id"])
+    now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    start = (now - timedelta(days=days)).strftime("%Y-%m-%d")
+    all_docs = await db.daily_progress.find({"user_id": uid}, {"_id": 0}).to_list(1000)
+    docs = [d for d in all_docs if d.get("date", "") >= start]
+    if not docs:
+        return {"total_days_tracked": 0, "avg_completion": 0, "perfect_days": 0, "most_missed_tasks": [], "best_tasks": [], "delay_insights": [], "streak": 0, "period_days": days}
+    total = len(docs)
+    avg_comp = round(sum(d.get("completion_percentage", 0) for d in docs) / total)
+    perfect = len([d for d in docs if d.get("completion_percentage", 0) >= 100])
+    missed_c = {}
+    completed_c = {}
+    delay_data = {}
+    task_names = {}
+    for doc in docs:
+        ds = doc.get("date", "")
+        try:
+            dtt = datetime.strptime(ds, "%Y-%m-%d")
+            sch = get_day_schedule(dtt.strftime("%A"), dtt.date())
+            task_ids = get_all_task_ids(sch)
+            comp = doc.get("completed_tasks", [])
+            tms = doc.get("task_timings", {})
+            sched_map = {}
+            for b in sch:
+                for it in b["items"]:
+                    sched_map[it["id"]] = {"time": b["time"], "text": it["text"]}
+                    task_names[it["id"]] = it["text"]
+            for t in task_ids:
+                if t not in comp:
+                    missed_c[t] = missed_c.get(t, 0) + 1
+                else:
+                    completed_c[t] = completed_c.get(t, 0) + 1
+                if t in tms and t in sched_map:
+                    try:
+                        ah, am = map(int, tms[t].split(":"))
+                        sh, smn = map(int, sched_map[t]["time"].split(":"))
+                        delay = (ah * 60 + am) - (sh * 60 + smn)
+                        if t not in delay_data:
+                            delay_data[t] = {"text": sched_map[t]["text"], "delays": [], "scheduled": sched_map[t]["time"]}
+                        delay_data[t]["delays"].append(delay)
+                    except Exception:
+                        pass
+        except Exception:
+            continue
+    missed = sorted(missed_c.items(), key=lambda x: x[1], reverse=True)[:10]
+    missed_out = [{"id": t, "text": task_names.get(t, t), "missed_count": c, "total_days": total} for t, c in missed]
+    best = sorted(completed_c.items(), key=lambda x: x[1], reverse=True)[:10]
+    best_out = [{"id": t, "text": task_names.get(t, t), "completed_count": c, "total_days": total} for t, c in best]
+    delay_out = []
+    for t, d in delay_data.items():
+        if d["delays"]:
+            ad = round(sum(d["delays"]) / len(d["delays"]))
+            if ad > 0:
+                delay_out.append({"id": t, "text": d["text"], "avg_delay_minutes": ad, "scheduled_time": d["scheduled"], "times_tracked": len(d["delays"])})
+    delay_out.sort(key=lambda x: x["avg_delay_minutes"], reverse=True)
+    streak = 0
+    check = now.date()
+    while True:
+        ds = check.strftime("%Y-%m-%d")
+        f = next((d for d in all_docs if d.get("date") == ds), None)
+        if f and f.get("completion_percentage", 0) > 0:
+            streak += 1
+            check -= timedelta(days=1)
+        else:
+            break
+    return {
+        "total_days_tracked": total, "avg_completion": avg_comp, "perfect_days": perfect,
+        "most_missed_tasks": missed_out, "best_tasks": best_out,
+        "delay_insights": delay_out, "streak": streak, "period_days": days,
+    }
+
+# STARTUP
 @app.on_event("startup")
 async def startup():
-    # Create indexes
     await db.users.create_index("email", unique=True)
     await db.login_attempts.create_index("identifier")
-
-    # Seed admin
-    admin_email = os.environ.get("ADMIN_EMAIL", "sachin@example.com")
-    admin_password = os.environ.get("ADMIN_PASSWORD", "sachin123")
-    existing = await db.users.find_one({"email": admin_email})
-    if existing is None:
-        hashed = hash_password(admin_password)
-        await db.users.insert_one({
-            "email": admin_email,
-            "password_hash": hashed,
-            "name": "Sachin",
-            "role": "admin",
-            "created_at": datetime.now(timezone.utc)
-        })
-        logger.info(f"Admin user seeded: {admin_email}")
-    elif not verify_password(admin_password, existing["password_hash"]):
-        await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
-        logger.info(f"Admin password updated: {admin_email}")
-
-    # Write test credentials
-    cred_path = Path("/app/memory/test_credentials.md")
-    cred_path.parent.mkdir(parents=True, exist_ok=True)
-    cred_path.write_text(f"""# Test Credentials
-
-## Admin
-- Email: {admin_email}
-- Password: {admin_password}
-- Role: admin
-
-## Auth Endpoints
-- POST /api/auth/register
-- POST /api/auth/login
-- POST /api/auth/logout
-- GET /api/auth/me
-- POST /api/auth/refresh
-
-## Schedule Endpoints
-- GET /api/schedule
-- POST /api/schedule/toggle
-
-## History Endpoints
-- GET /api/history?month=1&year=2026
-""")
+    ae = os.environ.get("ADMIN_EMAIL", "sachin@example.com")
+    ap = os.environ.get("ADMIN_PASSWORD", "sachin123")
+    ex = await db.users.find_one({"email": ae})
+    if not ex:
+        await db.users.insert_one({"email": ae, "password_hash": hash_password(ap), "name": "Sachin", "role": "admin", "created_at": datetime.now(timezone.utc)})
+        logger.info(f"Admin seeded: {ae}")
+    elif not verify_password(ap, ex["password_hash"]):
+        await db.users.update_one({"email": ae}, {"$set": {"password_hash": hash_password(ap)}})
+    Path("/app/memory").mkdir(parents=True, exist_ok=True)
+    Path("/app/memory/test_credentials.md").write_text(f"# Test Credentials\n- Email: {ae}\n- Password: {ap}\n")
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
 
 app.include_router(api_router)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000")],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000")], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])

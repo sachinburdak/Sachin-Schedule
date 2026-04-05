@@ -161,7 +161,16 @@ class TestSchedule:
             first_item = first_block["items"][0]
             assert "id" in first_item
             assert "text" in first_item
-            assert "daily" in first_item
+        
+        # V2: Verify end_time field exists in all blocks
+        for block in data["schedule"]:
+            assert "end_time" in block, f"Block {block['id']} missing end_time field"
+        
+        # V2: Verify we have 11 blocks
+        assert len(data["schedule"]) == 11, f"Expected 11 blocks, got {len(data['schedule'])}"
+        
+        # V2: Verify task_timings field exists
+        assert "task_timings" in data, "task_timings field missing from response"
 
     def test_get_schedule_without_auth(self):
         """Test GET /api/schedule without authentication"""
@@ -318,3 +327,169 @@ class TestDataPersistence:
         assert verify_response.status_code == 200
         verify_data = verify_response.json()
         assert task_id in verify_data["completed_tasks"], "Toggled task should persist in database"
+
+
+
+class TestV2Features:
+    """V2 Feature Tests: Task timing, Analytics, Day detail"""
+
+    @pytest.fixture
+    def auth_token(self):
+        """Get auth token for authenticated requests"""
+        response = requests.post(f"{BASE_URL}/api/auth/login", json={
+            "email": "sachin@example.com",
+            "password": "sachin123"
+        })
+        return response.json()["access_token"]
+
+    def test_set_task_time(self, auth_token):
+        """Test POST /api/schedule/set-time"""
+        # Get schedule to get valid task_id and date
+        schedule_response = requests.get(f"{BASE_URL}/api/schedule", headers={
+            "Authorization": f"Bearer {auth_token}"
+        })
+        schedule_data = schedule_response.json()
+        date_str = schedule_data["date"]
+        task_id = schedule_data["schedule"][0]["items"][0]["id"]
+        
+        # Set actual time for task
+        response = requests.post(f"{BASE_URL}/api/schedule/set-time",
+            headers={"Authorization": f"Bearer {auth_token}"},
+            json={"task_id": task_id, "date": date_str, "actual_time": "06:15"}
+        )
+        assert response.status_code == 200, f"Set task time failed: {response.text}"
+        
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["task_id"] == task_id
+        assert data["actual_time"] == "06:15"
+        
+        # Verify persistence by fetching schedule again
+        verify_response = requests.get(f"{BASE_URL}/api/schedule", headers={
+            "Authorization": f"Bearer {auth_token}"
+        })
+        verify_data = verify_response.json()
+        assert task_id in verify_data["task_timings"], "Task timing should persist"
+        assert verify_data["task_timings"][task_id] == "06:15"
+
+    def test_get_analytics(self, auth_token):
+        """Test GET /api/analytics"""
+        response = requests.get(f"{BASE_URL}/api/analytics?days=30", headers={
+            "Authorization": f"Bearer {auth_token}"
+        })
+        assert response.status_code == 200, f"Get analytics failed: {response.text}"
+        
+        data = response.json()
+        # Verify all required fields
+        assert "total_days_tracked" in data
+        assert "avg_completion" in data
+        assert "perfect_days" in data
+        assert "most_missed_tasks" in data
+        assert "best_tasks" in data
+        assert "delay_insights" in data
+        assert "streak" in data
+        assert "period_days" in data
+        
+        # Verify data types
+        assert isinstance(data["total_days_tracked"], int)
+        assert isinstance(data["avg_completion"], int)
+        assert isinstance(data["perfect_days"], int)
+        assert isinstance(data["most_missed_tasks"], list)
+        assert isinstance(data["best_tasks"], list)
+        assert isinstance(data["delay_insights"], list)
+        assert isinstance(data["streak"], int)
+        assert data["period_days"] == 30
+
+    def test_get_analytics_different_periods(self, auth_token):
+        """Test GET /api/analytics with different period values"""
+        for days in [7, 14, 30]:
+            response = requests.get(f"{BASE_URL}/api/analytics?days={days}", headers={
+                "Authorization": f"Bearer {auth_token}"
+            })
+            assert response.status_code == 200, f"Analytics failed for {days} days"
+            data = response.json()
+            assert data["period_days"] == days
+
+    def test_get_day_detail(self, auth_token):
+        """Test GET /api/history/day/{date_str}"""
+        # Use today's date
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        response = requests.get(f"{BASE_URL}/api/history/day/{today}", headers={
+            "Authorization": f"Bearer {auth_token}"
+        })
+        assert response.status_code == 200, f"Get day detail failed: {response.text}"
+        
+        data = response.json()
+        # Verify all required fields
+        assert "date" in data
+        assert "day" in data
+        assert "schedule" in data
+        assert "completed_tasks" in data
+        assert "incomplete_tasks" in data
+        assert "incomplete_details" in data
+        assert "completed_details" in data
+        assert "task_timings" in data
+        assert "total_tasks" in data
+        assert "completed_count" in data
+        assert "completion_percentage" in data
+        
+        # Verify incomplete_details structure
+        assert isinstance(data["incomplete_details"], list)
+        if len(data["incomplete_details"]) > 0:
+            inc_task = data["incomplete_details"][0]
+            assert "id" in inc_task
+            assert "text" in inc_task
+            assert "block" in inc_task
+            assert "scheduled_time" in inc_task
+        
+        # Verify completed_details structure
+        assert isinstance(data["completed_details"], list)
+        if len(data["completed_details"]) > 0:
+            comp_task = data["completed_details"][0]
+            assert "id" in comp_task
+            assert "text" in comp_task
+            assert "block" in comp_task
+            assert "scheduled_time" in comp_task
+
+    def test_morning_routine_is_one_block(self, auth_token):
+        """Test that Morning Routine is ONE unified block"""
+        response = requests.get(f"{BASE_URL}/api/schedule", headers={
+            "Authorization": f"Bearer {auth_token}"
+        })
+        data = response.json()
+        
+        # Find Morning Routine block
+        morning_blocks = [b for b in data["schedule"] if "Morning Routine" in b["title"]]
+        assert len(morning_blocks) == 1, f"Expected 1 Morning Routine block, found {len(morning_blocks)}"
+        
+        morning_block = morning_blocks[0]
+        assert morning_block["time"] == "08:10"
+        assert morning_block["end_time"] == "09:30"
+        
+        # Verify it contains hygiene + diet + get ready items
+        item_texts = [item["text"].lower() for item in morning_block["items"]]
+        assert any("brush" in t for t in item_texts), "Morning Routine should include brush"
+        assert any("bath" in t for t in item_texts), "Morning Routine should include bath"
+        assert any("perfume" in t or "deodorant" in t for t in item_texts), "Morning Routine should include perfume/deodorant"
+
+    def test_sunday_shows_study_sessions(self, auth_token):
+        """Test that schedule shows Study sessions on Sunday (not Work)"""
+        response = requests.get(f"{BASE_URL}/api/schedule", headers={
+            "Authorization": f"Bearer {auth_token}"
+        })
+        data = response.json()
+        
+        # Check if today is Sunday
+        if data["day"] == "Sunday":
+            # Find session blocks
+            session_blocks = [b for b in data["schedule"] if "Session" in b["title"]]
+            
+            # Should have Study Session 1 and Study Session 2
+            study_sessions = [b for b in session_blocks if "Study" in b["title"]]
+            work_sessions = [b for b in session_blocks if "Work" in b["title"]]
+            
+            assert len(study_sessions) == 2, f"Expected 2 Study sessions on Sunday, found {len(study_sessions)}"
+            assert len(work_sessions) == 0, f"Expected 0 Work sessions on Sunday, found {len(work_sessions)}"
+        else:
+            pytest.skip(f"Today is {data['day']}, not Sunday. Skipping Sunday-specific test.")
